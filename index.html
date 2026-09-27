@@ -21,6 +21,7 @@
   </div>
   <div class="actions">
     <label id="fileLabel" class="btn ghost">Open video<input id="file" type="file" accept="video/*,.mkv,.avi,.mov,.webm,.ts,.flv" hidden></label>
+    <label id="addLabel" class="btn ghost disabled" title="Append videos to the end of the sequence">+ Add video<input id="addFile" type="file" multiple accept="video/*,.mkv,.avi,.mov,.webm,.ts,.flv" hidden></label>
     <button id="demo" class="btn ghost">Load demo clip</button>
     <select id="format" class="btn ghost" aria-label="Export format"><option value="mp4">MP4</option><option value="mov">MOV (FFmpeg)</option><option value="mkv">MKV (FFmpeg)</option></select>
     <button id="export" class="btn primary" disabled>Export</button>
@@ -52,7 +53,7 @@
       <button id="setOut" class="btn small" disabled>Set out (O)</button>
     </div>
     <div id="timeline" class="timeline">
-      <div class="track"><span class="tlabel">V1</span><div class="lane"><div id="clipBar" class="clip video"></div></div></div>
+      <div class="track"><span class="tlabel">V1</span><div id="v1Lane" class="lane"></div></div>
       <div class="track"><span class="tlabel">T1</span><div class="lane"><div id="titleBar" class="clip title">Title</div></div></div>
       <div class="track"><span class="tlabel">A1</span><div class="lane"><canvas id="wave" class="wave"></canvas></div></div>
       <div class="track"><span class="tlabel">VO</span><div class="lane" id="voLane"></div></div>
@@ -62,6 +63,8 @@
   </section>
 
   <aside class="panel">
+    <h2>Clips</h2>
+    <div id="clipList" class="clip-list"></div>
     <h2>Clip effects</h2>
     <div class="ctl"><label for="brightness">Brightness</label><input id="brightness" type="range" min="-0.5" max="0.5" step="0.01" value="0"></div>
     <div class="ctl"><label for="contrast">Contrast</label><input id="contrast" type="range" min="0.5" max="1.8" step="0.01" value="1"></div>

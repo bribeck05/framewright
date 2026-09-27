@@ -36,7 +36,7 @@ function ffmpeg(input, args, output, label) {
 const S = {
   meta: null, audioCtx: null, audioBuf: null, gainNode: null, node: null,
   dur: 0, inT: 0, outT: 0, pos: 0, playing: false, base: 0, t0: 0, exporting: false,
-  busy: false, stats: {}, speed: 1, vo: [], voNodes: [], rec: null, ffmpegUsed: null, pipeline: 'WebCodecs',
+  busy: false, stats: {}, speed: 1, clips: [], vo: [], voNodes: [], rec: null, ffmpegUsed: null, pipeline: 'WebCodecs',
 };
 window.__S = S; window.__engine = engine;
 const fx = () => ({
@@ -51,13 +51,14 @@ engine.onmessage = ({ data: m }) => {
   switch (m.type) {
     case 'ready': if (!m.webcodecs) toast('This browser lacks WebCodecs in workers. Use a recent Chrome, Edge, or Safari 26+.'); break;
     case 'loaded': case 'needsFallback': loadWaiter?.(m); loadWaiter = null; break;
+    case 'clips': syncClips(m.clips, m.dur); break;
     case 'stats': S.stats = m; break;
     case 'rotated': S.rot = m; document.documentElement.style.setProperty('--ar', `${m.width} / ${m.height}`); updateStats(); window.__rot = m; break;
     case 'progress': setProgress(m.pct); setStatus(m.msg); if (m.t != null) { $('tc').textContent = `${fmt(m.t)} / ${fmt(S.dur)}`; positionPlayhead(m.t); } break;
     case 'exported': onExported(m); break;
     case 'exportError': onExportError(m.message); break;
     case 'error': toast(m.message); console.error(m.message); break;
-    case 'audioProgress': S.audioStatus = `decoding to disk ${m.pct.toFixed(0)}%${m.note ? ' (' + m.note + ')' : ''}`; if (!S.pcm) drawWave(); break;
+    case 'audioProgress': { const c = S.clips.find((x) => x.key === m.key) || S.clips.find((x) => x.hasAudio && !x.pcm); if (c) { c.audioStatus = `decoding to disk ${m.pct.toFixed(0)}%${m.note ? ' (' + m.note + ')' : ''}`; drawWave(); } break; }
     case 'audioReady': onAudioReady(m); break;
     case 'audioUnsupported': onAudioUnsupported(m); break;
     case 'storageCleared': toast('Cleared cached audio and exports from browser storage.'); refreshStorage(); break;
@@ -67,10 +68,31 @@ const canvasEl = $('view');
 const offscreen = canvasEl.transferControlToOffscreen();
 engine.postMessage({ type: 'init', canvas: offscreen }, [offscreen]);
 
-function engineLoad(file, name) {
+function engineLoad(file, name, append) {
   // File objects are disk-backed references; posting one to the worker copies nothing.
-  return new Promise((resolve) => { loadWaiter = resolve; engine.postMessage({ type: 'load', file, name }); });
+  return new Promise((resolve) => { loadWaiter = resolve; engine.postMessage({ type: 'load', file, name, append }); });
 }
+// Merge the worker's sequence layout into our clip records (keeps per-clip audio state)
+function syncClips(list, dur) {
+  const old = new Map(S.clips.map((c) => [c.id, c]));
+  S.clips = list.map((c) => Object.assign(old.get(c.id) || { audioStatus: c.hasAudio ? 'waiting' : 'none' }, c));
+  const wasFull = S.outT >= S.dur - 1;
+  S.dur = dur;
+  if (!S.clips.length) { resetEmpty(); return; }
+  if (wasFull || S.outT > dur) S.outT = dur;
+  S.inT = Math.min(S.inT, S.outT - 1e5 > 0 ? S.outT - 1e5 : 0);
+  S.pos = Math.min(S.pos, dur - 1);
+  S.meta = { ...S.meta, ...S.clips[0].meta };
+  drawWave(); layoutTimeline(); renderClipList(); updateStats();
+}
+function resetEmpty() {
+  S.meta = null; S.dur = 0; S.inT = S.outT = S.pos = 0;
+  $('empty').hidden = false;
+  for (const id of ['play', 'setIn', 'setOut', 'export', 'rotate', 'addLabel']) { const el = $(id); if (el) { el.disabled = true; el.classList?.toggle('disabled', id === 'addLabel'); } }
+  $('tc').textContent = '00:00.000 / 00:00.000';
+  drawWave(); layoutTimeline(); renderClipList();
+}
+const clipAt = (t) => S.clips.find((c) => t < c.start + c.dur) || S.clips[S.clips.length - 1];
 
 // ---------------------------------------------------------------- Loading with FFmpeg.wasm fallback
 async function proxyVideoArgs() {
@@ -82,7 +104,7 @@ async function proxyVideoArgs() {
 }
 const extOf = (name) => (name.match(/\.[a-z0-9]+$/i)?.[0] ?? '.bin').toLowerCase();
 
-async function loadFile(file, name = file.name) {
+async function loadFile(file, name = file.name, append = false) {
   if (S.busy) return;
   S.busy = true; setBusy(true);
   pause();
@@ -90,9 +112,9 @@ async function loadFile(file, name = file.name) {
     S.audioCtx ??= new AudioContext({ sampleRate: 48000 });
     navigator.storage?.persist?.().catch(() => {});
     S.ffmpegUsed = null; S.pipeline = 'WebCodecs (streamed from disk)';
-    S.pcm = null; S.pcmFile = null; S.audioStatus = 'waiting';
-    S.srcFile = file;
-    let res = await engineLoad(file, name);
+    append = append && S.clips.length > 0;
+    let srcFile = file;
+    let res = await engineLoad(file, name, append);
     if (res.type === 'needsFallback') {
       showExportBox(); $('download').hidden = true; $('result').hidden = true;
       const inName = 'input' + extOf(name);
@@ -100,8 +122,8 @@ async function loadFile(file, name = file.name) {
         setStatus(`Container not readable by mp4box (${name}). Remuxing with FFmpeg.wasm…`);
         try {
           const r = await ffmpeg({ name: inName, file }, ['-i', inName, '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-movflags', '+faststart', 'out.mp4'], 'out.mp4', 'remux → MP4');
-          S.srcFile = new File([r.data], 'proxy.mp4', { lastModified: Date.now() });
-          res = await engineLoad(S.srcFile, name);
+          srcFile = new File([r.data], 'proxy.mp4', { lastModified: Date.now() });
+          res = await engineLoad(srcFile, name, append);
           S.pipeline = 'FFmpeg.wasm remux → WebCodecs';
         } catch (e) { console.warn('remux failed, transcoding', e); res = { type: 'needsFallback', reason: 'codec', detail: 'remux failed' }; }
       }
@@ -109,45 +131,54 @@ async function loadFile(file, name = file.name) {
         const p = await proxyVideoArgs();
         setStatus(`WebCodecs can't decode ${res.detail}. Transcoding ${p.label} with FFmpeg.wasm…`);
         const r = await ffmpeg({ name: inName, file }, ['-i', inName, '-map', '0:v:0', '-map', '0:a:0?', ...p.args, '-c:a', 'aac', '-b:a', '160k', '-ac', '2', '-movflags', '+faststart', 'out.mp4'], 'out.mp4', p.label);
-        S.srcFile = new File([r.data], 'proxy.mp4', { lastModified: Date.now() });
-        res = await engineLoad(S.srcFile, name);
+        srcFile = new File([r.data], 'proxy.mp4', { lastModified: Date.now() });
+        res = await engineLoad(srcFile, name, append);
         S.pipeline = `FFmpeg.wasm ${p.label} → WebCodecs`;
         if (res.type !== 'loaded') throw new Error('Could not decode the transcoded proxy');
       }
       setStatus(`Loaded via ${S.pipeline}`); setProgress(100);
     }
     const meta = res.meta;
-    S.meta = meta; S.dur = meta.dur; S.inT = 0; S.outT = meta.dur; S.pos = 0;
-    if (!meta.hasAudio) S.audioStatus = 'none';
+    if (!append) { S.clips = []; S.inT = 0; S.outT = res.seqDur; S.pos = 0; S.dur = res.seqDur; S.meta = meta; }
+    else if (S.outT >= S.dur - 1) S.outT = res.seqDur; // keep an untrimmed end glued to the new end
+    syncClips(res.clips, res.seqDur);
+    const clip = S.clips.find((c) => c.id === res.clipId);
+    Object.assign(clip, { meta, srcFile, pipeline: S.pipeline });
+    if (clip === S.clips[0]) S.meta = meta;
+    if (clip.pendingAudio) { const m = clip.pendingAudio; clip.pendingAudio = null; m.type === 'audioReady' ? onAudioReady(m) : onAudioUnsupported(m); }
     if (!S.gainNode) { S.gainNode = S.audioCtx.createGain(); S.gainNode.connect(S.audioCtx.destination); }
     $('empty').hidden = true;
     for (const id of ['play', 'setIn', 'setOut', 'export', 'rotate']) $(id).disabled = false;
-    $('titleEnd').value = Math.min(+$('titleEnd').value, meta.dur / 1e6).toFixed(1);
-    drawWave(); layoutTimeline(); updateStats(); refreshStorage();
-    window.__loaded = { pipeline: S.pipeline, codec: meta.codec, headerBytes: meta.headerBytes, fileSize: meta.fileSize };
+    $('addLabel').classList.remove('disabled');
+    if (!append) $('titleEnd').value = Math.min(+$('titleEnd').value, S.dur / 1e6).toFixed(1);
+    drawWave(); layoutTimeline(); renderClipList(); updateStats(); refreshStorage();
+    if (append) toast(`Added "${name}" at ${fmt(clip.start)}. Sequence is now ${fmt(S.dur)}.`);
+    window.__loaded = { clips: S.clips.length, seqDur: S.dur, pipeline: S.pipeline, codec: meta.codec, headerBytes: meta.headerBytes, fileSize: meta.fileSize };
   } catch (e) { console.error(e); toast(e.message); setStatus('Load failed: ' + e.message); window.__loaded = { error: e.message }; }
   finally { S.busy = false; setBusy(false); }
 }
 async function onAudioReady(m) {
-  if (!S.meta || m.key !== S.meta.key) return;
+  const targets = S.clips.filter((c) => c.key === m.key);
+  if (!targets.length) return;
+  if (targets.some((c) => !c.meta)) { for (const c of targets) c.pendingAudio = m; if (targets.every((c) => !c.meta)) return; }
   const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('cache');
-  S.pcmFile = await (await dir.getFileHandle(m.key + '.f32')).getFile();
-  S.pcm = m;
-  S.audioStatus = m.cached ? 'from disk cache' : 'decoded to disk';
+  const file = await (await dir.getFileHandle(m.key + '.f32')).getFile();
+  for (const c of targets) { c.pcm = m; c.pcmFile = file; c.audioStatus = m.cached ? 'from disk cache' : 'decoded to disk'; }
   drawWave(); updateStats(); refreshStorage();
-  window.__audio = { frames: m.frames, sampleRate: m.sampleRate, channels: m.channels, cached: m.cached, bytes: S.pcmFile.size };
+  window.__audio = { frames: m.frames, sampleRate: m.sampleRate, channels: m.channels, cached: m.cached, bytes: file.size, ready: S.clips.filter((c) => c.pcm).length };
 }
 async function onAudioUnsupported(m) {
-  if (!S.meta || m.key !== S.meta.key) return;
+  const c = S.clips.find((x) => x.key === m.key); if (!c) return;
+  if (!c.srcFile) { c.pendingAudio = m; return; }
   // Fallback: the browser's own decoder needs the whole file in memory, so only for smaller files
   const LIMIT = 400 * 1024 * 1024;
-  if (S.srcFile.size > LIMIT) { S.audioStatus = 'unsupported (file too large for fallback)'; toast(`Audio skipped: ${m.reason}`); updateStats(); return; }
+  if (c.srcFile.size > LIMIT) { c.audioStatus = 'unsupported (file too large for fallback)'; toast(`Audio skipped for ${c.name}: ${m.reason}`); updateStats(); return; }
   try {
-    S.audioStatus = 'fallback decode…';
-    const ab = await S.audioCtx.decodeAudioData(await S.srcFile.arrayBuffer());
-    const ch = Math.min(2, ab.numberOfChannels), channels = Array.from({ length: ch }, (_, c) => ab.getChannelData(c).slice());
-    engine.postMessage({ type: 'writePCM', key: m.key, sampleRate: ab.sampleRate, channels }, channels.map((c) => c.buffer));
-  } catch (e) { S.audioStatus = 'unsupported'; toast('Audio could not be decoded: ' + e.message); updateStats(); }
+    c.audioStatus = 'fallback decode…';
+    const ab = await S.audioCtx.decodeAudioData(await c.srcFile.arrayBuffer());
+    const ch = Math.min(2, ab.numberOfChannels), channels = Array.from({ length: ch }, (_, k) => ab.getChannelData(k).slice());
+    engine.postMessage({ type: 'writePCM', key: m.key, sampleRate: ab.sampleRate, channels }, channels.map((x) => x.buffer));
+  } catch (e) { c.audioStatus = 'unsupported'; toast(`Audio could not be decoded for ${c.name}: ${e.message}`); updateStats(); }
 }
 async function refreshStorage() {
   try { const e = await navigator.storage.estimate(); S.storage = `${(e.usage / 1e6).toFixed(1)} MB used`; updateStats(); } catch {}
@@ -156,35 +187,43 @@ async function refreshStorage() {
 // ---------------------------------------------------------------- Playback (audio clock is master)
 function clockNow() {
   if (!S.playing) return S.pos;
-  if (S.pcm) {
+  if (S.audioCtx) {
     const lat = S.audioCtx.outputLatency || S.audioCtx.baseLatency || 0;
     return S.base + Math.max(0, S.audioCtx.currentTime - S.t0 - lat) * 1e6 * S.speed;
   }
   return S.base + (performance.now() - S.t0) * 1000 * S.speed;
 }
-// Read ~1 s of interleaved f32 PCM from the OPFS cache into an AudioBuffer
-async function readSegment(frame, n) {
-  const p = S.pcm, ch = p.channels;
-  const f = new Float32Array(await S.pcmFile.slice(frame * ch * 4, (frame + n) * ch * 4).arrayBuffer());
+// Read ~1 s of interleaved f32 PCM from a clip's OPFS cache into an AudioBuffer
+async function readSegment(c, frame, n) {
+  const p = c.pcm, ch = p.channels;
+  const f = new Float32Array(await c.pcmFile.slice(frame * ch * 4, (frame + n) * ch * 4).arrayBuffer());
   const len = f.length / ch; if (!len) return null;
   const buf = S.audioCtx.createBuffer(ch, len, p.sampleRate);
-  for (let c = 0; c < ch; c++) { const d = buf.getChannelData(c); for (let i = 0; i < len; i++) d[i] = f[i * ch + c]; }
+  for (let k = 0; k < ch; k++) { const d = buf.getChannelData(k); for (let i = 0; i < len; i++) d[i] = f[i * ch + k]; }
   return buf;
 }
-// Keep ~2 s of audio scheduled ahead; segments are sample-accurately chained on the AudioContext clock
+// Walk the sequence clip by clip, keeping ~2 s of audio scheduled ahead on the AudioContext clock.
+// Clips without (ready) audio just advance the schedule by their length, i.e. silence.
 async function streamAudio(gen, first) {
-  const p = S.pcm, ctx = S.audioCtx, SEG = p.sampleRate;
-  let frame = Math.floor((S.pos / 1e6) * p.sampleRate), at = S.t0, buf = first;
-  while (S.playing && S.audioGen === gen && frame < p.frames) {
+  const ctx = S.audioCtx;
+  let at = S.t0, buf = first, t = S.pos;
+  let ci = S.clips.indexOf(clipAt(t));
+  while (S.playing && S.audioGen === gen && ci < S.clips.length) {
+    const c = S.clips[ci], local = Math.max(0, t - c.start);
+    if (!c.pcm) { at += (c.start + c.dur - t) / 1e6 / S.speed; t = c.start + c.dur; ci++; buf = null; continue; }
+    const p = c.pcm, clipFrames = Math.min(p.frames, Math.round((c.dur / 1e6) * p.sampleRate));
+    let frame = Math.floor((local / 1e6) * p.sampleRate);
+    if (frame >= clipFrames) { at += (c.start + c.dur - t) / 1e6 / S.speed; t = c.start + c.dur; ci++; buf = null; continue; }
     if (!buf) {
       if (at - ctx.currentTime > 2) { await new Promise((r) => setTimeout(r, 150)); continue; }
-      buf = await readSegment(frame, Math.min(SEG, p.frames - frame));
-      if (!buf || S.audioGen !== gen) break;
+      buf = await readSegment(c, frame, Math.min(p.sampleRate, clipFrames - frame));
+      if (S.audioGen !== gen) break;
+      if (!buf) { t = c.start + c.dur; ci++; continue; }
     }
     const s = ctx.createBufferSource(); s.buffer = buf; s.playbackRate.value = S.speed; s.connect(S.gainNode);
     s.start(Math.max(at, ctx.currentTime));
     S.aNodes.push(s); s.onended = () => { S.aNodes = S.aNodes.filter((x) => x !== s); };
-    at += buf.length / p.sampleRate / S.speed; frame += buf.length; buf = null;
+    at += buf.length / p.sampleRate / S.speed; t += (buf.length / p.sampleRate) * 1e6; buf = null;
   }
 }
 async function play() {
@@ -195,18 +234,17 @@ async function play() {
   S.base = S.pos;
   S.aNodes ??= [];
   const gen = S.audioGen = (S.audioGen || 0) + 1;
-  if (S.pcm) {
-    S.starting = true;
-    await S.audioCtx.resume();
-    const first = await readSegment(Math.floor((S.pos / 1e6) * S.pcm.sampleRate), S.pcm.sampleRate).catch(() => null);
-    S.starting = false;
-    if (gen !== S.audioGen) return;
-    S.t0 = S.audioCtx.currentTime + 0.05;
-    S.playing = true;
-    streamAudio(gen, first);
-  } else S.t0 = performance.now();
+  S.starting = true;
+  await S.audioCtx.resume();
+  const c = clipAt(S.pos);
+  const first = c?.pcm ? await readSegment(c, Math.floor(((S.pos - c.start) / 1e6) * c.pcm.sampleRate), c.pcm.sampleRate).catch(() => null) : null;
+  S.starting = false;
+  if (gen !== S.audioGen) return;
+  S.t0 = S.audioCtx.currentTime + 0.05;
+  S.playing = true;
+  streamAudio(gen, first);
   scheduleVoiceovers();
-  S.playing = true; $('play').textContent = '❚❚'; $('play').setAttribute('aria-label', 'Pause');
+  $('play').textContent = '❚❚'; $('play').setAttribute('aria-label', 'Pause');
 }
 function pause() {
   if (!S.playing) return;
@@ -239,7 +277,7 @@ function laneBox() { const l = document.querySelector('.lane').getBoundingClient
 const tToX = (t) => { const b = laneBox(); return b.x + (t / S.dur) * b.w; };
 function positionPlayhead(t) { if (S.dur) $('playhead').style.left = tToX(t) + 'px'; }
 function layoutTimeline() {
-  if (!S.dur) return;
+  if (!S.dur) { $('v1Lane').innerHTML = ''; $('titleBar').style.display = 'none'; return; }
   const b = laneBox();
   $('range').style.left = tToX(S.inT) + 'px'; $('range').style.width = ((S.outT - S.inT) / S.dur) * b.w + 'px';
   const ti = fx().title, bar = $('titleBar');
@@ -247,23 +285,46 @@ function layoutTimeline() {
   bar.style.display = ti.text && e > s ? 'flex' : 'none';
   bar.style.left = (s / S.dur) * 100 + '%'; bar.style.width = ((e - s) / S.dur) * 100 + '%';
   bar.textContent = ti.text;
-  $('clipBar').textContent = S.meta?.name ?? '';
+  // V1: one segment per clip, butted end to end
+  const lane = $('v1Lane');
+  lane.innerHTML = S.clips.map((c, i) => `<div class="clip video${i % 2 ? ' alt' : ''}" style="left:${(c.start / S.dur) * 100}%;width:${(c.dur / S.dur) * 100}%" title="${c.name}">${c.name}</div>`).join('');
   layoutVoLane();
 }
 function drawWave() {
   const c = $('wave'), r = c.getBoundingClientRect(), dpr = devicePixelRatio || 1;
   c.width = r.width * dpr; c.height = r.height * dpr;
   const g = c.getContext('2d'); g.clearRect(0, 0, c.width, c.height);
-  if (!S.pcm) { g.fillStyle = '#555'; g.font = `${11 * dpr}px monospace`; g.fillText(S.meta?.hasAudio ? 'audio: ' + (S.audioStatus || '…') : 'no audio', 8 * dpr, 17 * dpr); return; }
-  // Peaks were computed in the worker while decoding, so the full PCM never loads here
-  const pk = S.pcm.peaks, mid = c.height / 2;
-  const used = Math.min(pk.length, Math.ceil(pk.length * (S.pcm.frames / S.pcm.sampleRate) / (S.dur / 1e6)));
-  g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--wave');
-  for (let x = 0; x < c.width; x++) {
-    const b = Math.floor((x / c.width) * used), h = Math.max(1, (pk[b] || 0) * mid);
-    g.fillRect(x, mid - h, 1, h * 2);
+  if (!S.dur) return;
+  const mid = c.height / 2, col = getComputedStyle(document.documentElement).getPropertyValue('--wave');
+  g.font = `${10 * dpr}px monospace`;
+  // Peaks were computed in the worker while decoding, so no PCM loads here
+  for (const cl of S.clips) {
+    const x0 = Math.round((cl.start / S.dur) * c.width), x1 = Math.round(((cl.start + cl.dur) / S.dur) * c.width);
+    if (!cl.pcm) { g.fillStyle = '#555'; g.fillText(cl.hasAudio ? 'audio: ' + (cl.audioStatus || '…') : 'no audio', x0 + 6 * dpr, 16 * dpr, Math.max(10, x1 - x0 - 8 * dpr)); continue; }
+    const pk = cl.pcm.peaks, used = Math.min(pk.length, Math.ceil(pk.length * (cl.pcm.frames / cl.pcm.sampleRate) / (cl.dur / 1e6)));
+    g.fillStyle = col;
+    for (let x = x0; x < x1; x++) { const b = Math.floor(((x - x0) / (x1 - x0)) * used), h = Math.max(1, (pk[b] || 0) * mid); g.fillRect(x, mid - h, 1, h * 2); }
+    if (x0 > 0) { g.fillStyle = 'rgba(0,0,0,.6)'; g.fillRect(x0, 0, Math.max(1, dpr), c.height); }
   }
 }
+// Clip list in the panel: reorder / remove
+function renderClipList() {
+  const el = $('clipList'); if (!el) return;
+  if (!S.clips.length) { el.innerHTML = '<p class="muted small">No clips yet. Open a video, then use Add video to append more.</p>'; return; }
+  el.innerHTML = S.clips.map((c, i) => `<div class="clip-row">
+    <span class="clip-idx mono">${i + 1}</span>
+    <span class="clip-name" title="${c.name}">${c.name}<small class="mono">${fmt(c.dur)} · ${c.width}×${c.height}${c.rotation ? ' · ' + c.rotation + '°' : ''}</small></span>
+    <button class="btn small" data-a="up" data-id="${c.id}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${c.name} earlier">↑</button>
+    <button class="btn small" data-a="down" data-id="${c.id}" ${i === S.clips.length - 1 ? 'disabled' : ''} aria-label="Move ${c.name} later">↓</button>
+    <button class="btn small" data-a="rm" data-id="${c.id}" aria-label="Remove ${c.name}">✕</button></div>`).join('');
+}
+$('clipList').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-a]'); if (!b || S.exporting || S.busy) return;
+  pause();
+  const id = +b.dataset.id;
+  if (b.dataset.a === 'rm') engine.postMessage({ type: 'removeClip', id });
+  else engine.postMessage({ type: 'moveClip', id, dir: b.dataset.a === 'up' ? -1 : 1 });
+});
 function scrubAt(clientX) {
   const b = laneBox();
   const t = Math.min(S.dur - 1, Math.max(0, ((clientX - b.abs) / b.w) * S.dur));
@@ -290,14 +351,17 @@ addEventListener('keydown', (e) => {
 });
 
 function updateStats() {
-  const m = S.meta; if (!m) return;
+  if (!S.meta || !S.clips.length) { $('stats').innerHTML = ''; return; }
   const st = S.stats;
+  const cc = S.clips.find((c) => c.id === st.clipId) || clipAt(S.pos) || S.clips[0];
+  const m = { ...S.meta, ...(cc.meta || {}) };
+  const rot = { rotation: cc.rotation, width: cc.width, height: cc.height };
   const rows = [
-    ['Pipeline', S.pipeline], ['Codec', m.codec], ['Size', `${m.width}×${m.height}` + (S.rot ? ` → ${S.rot.width}×${S.rot.height}` : '')], ['Rotation', `${m.rotation}° tag` + (S.rot && S.rot.rotation !== m.rotation ? `, ${S.rot.rotation}° applied` : '')], ['FPS', m.fps],
-    ['Samples', `${m.samples} (${m.keyframes} key)`], ['Audio', S.pcm ? `${S.pcm.channels}ch @ ${S.pcm.sampleRate / 1000}kHz, ${S.audioStatus}` : (S.audioStatus || 'none')],
-    ['Source', `${(m.fileSize / 1e6).toFixed(1)} MB on disk · ${((st.diskRead ?? 0) / 1e6).toFixed(1)} MB read`],
+    ['Clips', `${S.clips.length} · now ${S.clips.indexOf(cc) + 1}: ${cc.name}`], ['Sequence', fmt(S.dur)], ['Pipeline', cc.pipeline || S.pipeline], ['Codec', m.codec], ['Size', `${m.width}×${m.height} → ${rot.width}×${rot.height}`], ['Output', S.rot ? `${S.rot.width}×${S.rot.height} @ ${S.meta.fps} fps` : ''], ['Rotation', `${m.rotation}° tag` + (rot.rotation !== m.rotation ? `, ${rot.rotation}° applied` : '')], ['FPS', m.fps],
+    ['Samples', `${m.samples} (${m.keyframes} key)`], ['Audio', cc.pcm ? `${cc.pcm.channels}ch @ ${cc.pcm.sampleRate / 1000}kHz, ${cc.audioStatus}` : (cc.audioStatus || 'none')],
+    ['Source', `${(S.clips.reduce((a, c) => a + (c.meta?.fileSize || 0), 0) / 1e6).toFixed(1)} MB on disk · ${((st.diskRead ?? 0) / 1e6).toFixed(1)} MB read`],
     ['Storage', S.storage || '…'],
-    ['Threads', 'UI · engine' + (ffWorker ? ' · ffmpeg' : '')],
+    ['Threads', 'UI · engine' + (ffWorker ? ' · ffmpeg' : '')], ['Decoders', `${st.decoders ?? 0} live`],
     ['Decode queue', st.decodeQueue ?? 0], ['Frame queue', st.queue ?? 0],
     ['Decoded', st.decoded ?? 0], ['Seek-skipped', st.dropped ?? 0], ['Late ticks', st.late ?? 0],
     ['Trim', `${fmt(S.inT)} → ${fmt(S.outT)}`], ['Voice-over', `${S.vo.length} clip(s)`], ['Speed', `${S.speed}× → ${fmt((S.outT - S.inT) / S.speed)} out`],
@@ -327,7 +391,7 @@ function scheduleVoiceovers() {
   const ctx = S.audioCtx; if (!ctx) return;
   if (!S.voBus) { S.voBus = ctx.createGain(); S.voBus.connect(ctx.destination); }
   S.voBus.gain.value = +$('voGain').value;
-  const t0 = S.pcm ? S.t0 : ctx.currentTime + 0.05;
+  const t0 = S.t0;
   const duck = +$('duck').value, g = S.gainNode?.gain, base = +$('gain').value;
   g?.cancelScheduledValues(0); if (g) g.setValueAtTime(base, ctx.currentTime);
   for (const c of S.vo) {
@@ -454,12 +518,13 @@ function mixVoiceovers(audio, outLen) {
 function showExportBox() { $('exportBox').hidden = false; }
 function setStatus(msg) { $('exportMsg').textContent = msg; }
 function setProgress(p) { $('bar').style.width = Math.max(0, Math.min(100, p)) + '%'; }
-function setBusy(b) { for (const id of ['demo', 'export']) $(id).disabled = b || (id === 'export' && !S.meta); $('fileLabel').classList.toggle('disabled', b); }
+function setBusy(b) { for (const id of ['demo', 'export']) $(id).disabled = b || (id === 'export' && !S.meta); $('fileLabel').classList.toggle('disabled', b); $('addLabel').classList.toggle('disabled', b || !S.clips.length); }
 
 let exportStarted = 0;
 function exportVideo() {
   if (!S.meta || S.exporting || S.busy) return;
-  if (S.meta.hasAudio && !S.pcm && !/unsupported|cleared/.test(S.audioStatus || '')) { toast('Audio is still being decoded to disk. Export will be available in a moment.'); return; }
+  const waiting = S.clips.filter((c) => c.hasAudio && !c.pcm && !/unsupported|cleared/.test(c.audioStatus || ''));
+  if (waiting.length) { toast(`Audio is still being decoded to disk for ${waiting.map((c) => c.name).join(', ')}. Try again in a moment.`); return; }
   pause(); S.exporting = true; setBusy(true);
   showExportBox();
   // On phones the progress box sits far below the header button; bring it into view
@@ -504,12 +569,17 @@ $('export').onclick = exportVideo;
 
 // ---------------------------------------------------------------- Boot
 $('file').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) loadFile(f); e.target.value = ''; });
+// Add video: append one or more files to the end of the sequence, in the order picked
+$('addFile').addEventListener('change', async (e) => {
+  const files = [...e.target.files]; e.target.value = '';
+  for (const f of files) { while (S.busy) await new Promise((r) => setTimeout(r, 100)); await loadFile(f, f.name, true); }
+});
 const fileFromUrl = async (u) => { const name = u.split('/').pop(); const b = await (await fetch(u)).blob(); return new File([b], name, { type: b.type, lastModified: 1 }); };
 $('demo').onclick = async () => {
   try { loadFile(await fileFromUrl('sample.mp4')); }
   catch (e) { toast('Could not load demo: ' + e.message); }
 };
-$('clearStorage').onclick = () => { if (S.exporting) return; pause(); S.pcm = null; S.pcmFile = null; if (S.meta?.hasAudio) S.audioStatus = 'cleared (reopen the video to restore audio)'; drawWave(); updateStats(); engine.postMessage({ type: 'clearStorage' }); };
-window.__loadUrl = async (u) => loadFile(await fileFromUrl(u));
+$('clearStorage').onclick = () => { if (S.exporting) return; pause(); for (const c of S.clips) { c.pcm = null; c.pcmFile = null; if (c.hasAudio) c.audioStatus = 'cleared (reopen the videos to restore audio)'; } drawWave(); updateStats(); engine.postMessage({ type: 'clearStorage' }); };
+window.__loadUrl = async (u, append) => loadFile(await fileFromUrl(u), undefined, append);
 renderVoList();
 requestAnimationFrame(tick);

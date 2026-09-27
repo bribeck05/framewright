@@ -32,7 +32,8 @@ body{background:var(--bg);color:var(--text);font:14px/1.45 var(--font);display:f
 .tlabel{width:40px;text-align:center;color:var(--muted);font:500 11px var(--mono)}
 .lane{position:relative;flex:1;height:26px;margin-right:12px;background:#151515;border-radius:4px}
 .clip{position:absolute;top:0;bottom:0;border-radius:4px;font-size:11px;padding:0 8px;display:flex;align-items:center;overflow:hidden;white-space:nowrap}
-.clip.video{left:0;right:0;background:var(--video)}
+.clip.video{background:var(--video);border-right:1px solid #121212}
+.clip.video.alt{background:#4f7f6a}
 .clip.title{background:var(--title);display:none}
 .wave{width:100%;height:100%;display:block}
 .range{position:absolute;top:0;bottom:0;border-left:2px solid var(--accent);border-right:2px solid var(--accent);background:rgba(232,163,61,.07);pointer-events:none}
@@ -74,7 +75,7 @@ select.btn{appearance:none;padding-right:14px}
   .brand{font-size:15px}
   .actions{width:100%;display:grid;grid-template-columns:1fr 1fr;gap:8px}
   .actions > *{justify-content:center;min-height:44px}
-  #demo{order:1}#format{order:2}
+  #demo{order:2}#format{order:3}#export{order:4}#addLabel{order:1}
   .stage{padding:10px 12px;gap:8px}
   .viewer{flex:none;min-height:0;aspect-ratio:var(--ar,16/9);max-height:52vh;width:100%}
   .transport{flex-wrap:wrap;gap:8px}
@@ -98,4 +99,15 @@ select.btn{appearance:none;padding-right:14px}
   body{min-height:100%}
   .layout{display:block}
   .panel{overflow:visible}
+}
+.clip-list{display:flex;flex-direction:column;gap:6px}
+.clip-row{display:grid;grid-template-columns:22px 1fr auto auto auto;align-items:center;gap:6px;padding:6px 8px;background:var(--surface2);border:1px solid var(--line);border-radius:6px}
+.clip-idx{color:var(--accent);text-align:center}
+.clip-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.clip-name small{display:block;color:var(--muted);font-size:11px}
+.clip-row .btn.small{padding:3px 8px;min-width:28px;justify-content:center}
+@media (max-width:600px){
+  .actions{grid-template-columns:1fr 1fr}
+  #export{grid-column:1 / -1}
+  .clip-row .btn.small{min-width:40px;min-height:40px}
 }

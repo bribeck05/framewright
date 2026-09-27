@@ -147,12 +147,15 @@ const FS_GRADE = `#version 300 es
 precision highp float;
 in vec2 v; out vec4 o;
 uniform sampler2D uTex; uniform vec2 uRes;
-uniform float uB, uC, uS, uT, uV, uG, uSeed; uniform int uRot;
+uniform float uB, uC, uS, uT, uV, uG, uSeed; uniform int uRot; uniform vec2 uFit;
 float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)) + uSeed) * 43758.5453); }
 void main(){
   // Map output UV → source UV for the display rotation (clockwise quarter turns)
-  vec2 sv = uRot == 1 ? vec2(v.y, 1. - v.x) : uRot == 2 ? vec2(1. - v.x, 1. - v.y) : uRot == 3 ? vec2(1. - v.y, v.x) : v;
-  vec3 c = texture(uTex, sv).rgb;
+  // Letterbox: clips whose shape differs from the output are fitted inside it with black bars
+  vec2 fv = (v - .5) / uFit + .5;
+  vec2 sv = uRot == 1 ? vec2(fv.y, 1. - fv.x) : uRot == 2 ? vec2(1. - fv.x, 1. - fv.y) : uRot == 3 ? vec2(1. - fv.y, fv.x) : fv;
+  bool inside = all(greaterThanEqual(fv, vec2(0.))) && all(lessThanEqual(fv, vec2(1.)));
+  vec3 c = inside ? texture(uTex, sv).rgb : vec3(0.);
   c += uB;
   c = (c - .5) * uC + .5;
   float l = dot(c, vec3(.2126,.7152,.0722));
@@ -229,7 +232,7 @@ class Compositor {
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
   }
   // frame: VideoFrame; t: timeline seconds; fx: effect params
-  draw(frame, t, fx) {
+  draw(frame, t, fx, clip) {
     const gl = this.gl, W = this.canvas.width, H = this.canvas.height;
     gl.viewport(0, 0, W, H);
     gl.bindBuffer(gl.ARRAY_BUFFER, gl.getParameter(gl.ARRAY_BUFFER_BINDING));
@@ -243,7 +246,11 @@ class Compositor {
     gl.uniform1i(g.u.uTex, 0); gl.uniform2f(g.u.uRes, W, H);
     gl.uniform1f(g.u.uB, fx.brightness); gl.uniform1f(g.u.uC, fx.contrast); gl.uniform1f(g.u.uS, fx.saturation);
     gl.uniform1f(g.u.uT, fx.temperature); gl.uniform1f(g.u.uV, fx.vignette); gl.uniform1f(g.u.uG, fx.grain);
-    gl.uniform1f(g.u.uSeed, (t * 97.13) % 100); gl.uniform1i(g.u.uRot, this.rot || 0);
+    gl.uniform1f(g.u.uSeed, (t * 97.13) % 100); const q = clip ? clip.q : this.rot || 0;
+    gl.uniform1i(g.u.uRot, q);
+    // fit the clip's displayed (rotated) size into the output canvas
+    const dw = clip ? clip.dw : W, dh = clip ? clip.dh : H, k = Math.min(W / dw, H / dh);
+    gl.uniform2f(g.u.uFit, Math.min(1, (dw * k) / W), Math.min(1, (dh * k) / H));
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     // Layer 1: title with keyframed opacity + rise
     const { text, start, end, y } = fx.title;
@@ -294,25 +301,48 @@ function rotationFromMatrix(m) {
   const deg = Math.round((Math.atan2(b, a) * 180) / Math.PI / 90) * 90;
   return ((deg % 360) + 360) % 360;
 }
-function applyRotation() {
-  const m = W.media; if (!m) return;
-  const rot = (m.rotation + W.extraRot) % 360, q = rot / 90;
+// Each clip keeps its own rotation; the output canvas takes the first clip's displayed size.
+function clipRot(c) {
+  const m = c.media, rot = (m.rotation + c.extraRot) % 360, q = rot / 90;
   const w = m.width & ~1, h = m.height & ~1;
-  W.comp.rot = q;
-  if (q % 2) W.comp.resize(h, w); else W.comp.resize(w, h);
-  W.rotation = rot;
-  post({ type: 'rotated', rotation: rot, width: W.comp.canvas.width, height: W.comp.canvas.height });
+  c.rot = rot; c.q = q; c.dw = q % 2 ? h : w; c.dh = q % 2 ? w : h;
+}
+function applyRotation() {
+  const first = W.clips[0]; if (!first) return;
+  for (const c of W.clips) clipRot(c);
+  if (W.comp.canvas.width !== first.dw || W.comp.canvas.height !== first.dh) W.comp.resize(first.dw, first.dh);
+  W.media = first.media;
+  post({ type: 'rotated', rotation: first.rot, width: W.comp.canvas.width, height: W.comp.canvas.height });
 }
 
 // ---------------------------------------------------------------- Worker state + protocol
-const W = { comp: null, media: null, src: null, late: 0, exporting: false, lastStats: 0 };
+// W.clips is the sequence: clips play back to back; each has its own demuxed media, PCM cache,
+// and (only while near the playhead) its own FrameSource, so at most two VideoDecoders are live.
+const W = { comp: null, media: null, clips: [], cur: null, clipSeq: 0, late: 0, exporting: false, lastStats: 0, lastT: 0 };
+function relayout() { let t = 0; for (const c of W.clips) { c.start = t; t += c.media.dur; } W.seqDur = t; }
+function clipAt(t) { const cs = W.clips; for (const c of cs) if (t < c.start + c.media.dur) return c; return cs[cs.length - 1]; }
+function ensureFS(c, local = 0) { if (!c.fs) { c.fs = new FrameSource(c.media, c.media.config); c.fs.seek(local); } return c.fs; }
+function dropFS(keep) { for (const c of W.clips) if (c.fs && !keep.includes(c)) { c.fs.close(); c.fs = null; } }
+function clipsSummary() {
+  return W.clips.map((c) => ({ id: c.id, name: c.name, start: c.start, dur: c.media.dur, key: c.media.key, hasAudio: !!c.media.audioTrack, rotation: c.rot, width: c.dw, height: c.dh, fps: c.media.fps, codec: c.media.track.codec }));
+}
+function postClips() { relayout(); post({ type: 'clips', clips: clipsSummary(), dur: W.seqDur }); }
+function seekSeq(t) {
+  W.lastT = t;
+  if (!W.clips.length || W.audioBlocking || W.exporting) return;
+  const c = clipAt(t); W.cur = c;
+  dropFS([c]);
+  const local = Math.max(0, t - c.start);
+  if (c.fs) c.fs.seek(local); else ensureFS(c, local);
+}
 
 function stats(force) {
   const now = performance.now();
   if (!force && now - W.lastStats < 250) return;
   W.lastStats = now;
-  const s = W.src;
-  post({ type: 'stats', diskRead: W.media?.src?.bytesRead ?? 0, decodeQueue: s?.dec.decodeQueueSize ?? 0, queue: s?.queue.length ?? 0, decoded: s?.decoded ?? 0, dropped: s?.dropped ?? 0, late: W.late });
+  const s = W.cur?.fs;
+  const diskRead = W.clips.reduce((a, c) => a + (c.media.src.bytesRead || 0), 0);
+  post({ type: 'stats', diskRead, clipId: W.cur?.id, decoders: W.clips.filter((c) => c.fs).length, decodeQueue: s?.dec.decodeQueueSize ?? 0, queue: s?.queue.length ?? 0, decoded: s?.decoded ?? 0, dropped: s?.dropped ?? 0, late: W.late });
 }
 
 
@@ -331,9 +361,13 @@ function keyFor(file) {
   return 'a' + (h >>> 0).toString(36) + '-' + file.size.toString(36);
 }
 
-async function load(file, name) {
-  if (W.audioBlocking) { W.audioWorker?.terminate(); W.audioBlocking = false; }
-  W.src?.close(); W.src = null; W.media = null; W.audioGen = (W.audioGen || 0) + 1; W.audioWorker?.terminate(); W.audioWorker = null;
+async function load(file, name, append) {
+  if (!append || !W.clips.length) {
+    // New project: tear down every clip
+    for (const c of W.clips) { c.fs?.close(); c.media.audioWorker?.terminate(); }
+    W.clips = []; W.cur = null; W.media = null; W.audioBlocking = false;
+    W.audioGen = (W.audioGen || 0) + 1;
+  }
   const src = new DiskSource(file);
   let media;
   try { media = demux(src); }
@@ -356,17 +390,16 @@ async function load(file, name) {
   if (!ok) return post({ type: 'needsFallback', reason: 'codec', detail: t.codec });
   media.config = config;
   media.key = keyFor(file);
-  W.media = media;
-  W.extraRot = 0; applyRotation();
-  W.src = new FrameSource(media, config);
-  W.src.seek(0);
-  W.late = 0;
-  post({ type: 'loaded', meta: {
+  const clip = { id: ++W.clipSeq, name, media, extraRot: 0, fs: null };
+  W.clips.push(clip);
+  relayout(); applyRotation();
+  if (W.clips.length === 1) { W.late = 0; seekSeq(0); } else seekSeq(W.lastT || 0);
+  post({ type: 'loaded', append: !!append, clips: clipsSummary(), seqDur: W.seqDur, clipId: clip.id, meta: {
     name, codec: t.codec, width: media.width, height: media.height, fps: media.fps, dur: media.dur,
     rotation: media.rotation, samples: media.samples.length, keyframes: media.samples.filter((s) => s.is_sync).length,
     hasAudio: !!media.audioTrack, key: media.key, fileSize: file.size, headerBytes: media.headerBytes,
   } });
-  if (media.audioTrack && !self.NOAUD) decodeAudioToPCM(media, W.audioGen).catch((e) => post({ type: 'audioUnsupported', key: media.key, reason: e.message }));
+  if (media.audioTrack) decodeAudioToPCM(media, W.audioGen).catch((e) => post({ type: 'audioUnsupported', key: media.key, reason: e.message }));
 }
 
 // ---------------------------------------------------------------- Audio → PCM cache in OPFS
@@ -400,13 +433,13 @@ async function writeMeta(key, meta) {
 }
 async function pruneCache(keep) {
   const dir = await opfsDir('cache');
-  for await (const [n] of dir.entries()) if (!n.startsWith(keep)) { try { await dir.removeEntry(n); } catch {} }
+  for await (const [n] of dir.entries()) if (!keep.some((k) => n.startsWith(k))) { try { await dir.removeEntry(n); } catch {} }
 }
 async function decodeAudioToPCM(media, gen) {
   const key = media.key;
   const cached = await readMeta(key);
-  if (cached?.complete) { W.pcm = cached; return post({ type: 'audioReady', ...cached, cached: true }); }
-  await pruneCache(key); // keep OPFS usage bounded to the current project
+  if (cached?.complete) { media.pcm = cached; return post({ type: 'audioReady', ...cached, cached: true }); }
+  await pruneCache(W.clips.map((c) => c.media.key)); // keep OPFS usage bounded to the current sequence
   const cfg = audioConfig(media);
   let ok = false; try { ok = cfg && (await AudioDecoder.isConfigSupported(cfg)).supported; } catch {}
   if (!ok) return post({ type: 'audioUnsupported', key, reason: `AudioDecoder can't decode ${media.audioTrack.codec}` });
@@ -416,11 +449,11 @@ async function decodeAudioToPCM(media, gen) {
   const samples = media.audioSamples.map((x) => [x.offset, x.size, x.cts, x.duration, x.timescale]);
   const job = { file: media.src.file, samples, cfg, key, estSec: at.duration / at.timescale, outCh: Math.min(2, at.audio.channel_count || 2) };
   const runAudio = (stallMs) => new Promise((resolve, reject) => {
-    W.audioWorker?.terminate();
-    const aw = W.audioWorker = new Worker(new URL('./audio.worker.js', import.meta.url), { type: 'module' });
+    media.audioWorker?.terminate();
+    const aw = media.audioWorker = new Worker(new URL('./audio.worker.js', import.meta.url), { type: 'module' });
     let last = performance.now();
     const dog = setInterval(() => { if (performance.now() - last > stallMs) { clearInterval(dog); aw.terminate(); reject(Object.assign(new Error('stalled'), { stalled: true })); } }, 500);
-    const end = () => { clearInterval(dog); aw.terminate(); if (W.audioWorker === aw) W.audioWorker = null; };
+    const end = () => { clearInterval(dog); aw.terminate(); if (media.audioWorker === aw) media.audioWorker = null; };
     aw.onmessage = ({ data: m }) => {
       last = performance.now();
       if (m.type === 'progress') post({ type: 'audioProgress', pct: m.pct });
@@ -437,13 +470,13 @@ async function decodeAudioToPCM(media, gen) {
     // Some software video decoders (seen with VP9 / baseline H.264) starve AudioDecoder while
     // active. Park the preview decoder, decode audio, then bring the preview back.
     post({ type: 'audioProgress', pct: 0, note: 'preview paused while audio decodes' });
-    W.audioBlocking = true; W.src?.close(); W.src = null;
+    W.audioBlocking = true; dropFS([]);
     try { meta = await runAudio(15000); }
-    finally { W.audioBlocking = false; if (gen === W.audioGen && W.media === media) { W.src = new FrameSource(media, media.config); W.src.seek(W.lastT || 0); } }
+    finally { W.audioBlocking = false; if (gen === W.audioGen) seekSeq(W.lastT || 0); }
   }
   if (gen !== W.audioGen) return;
   await writeMeta(key, meta);
-  W.pcm = meta;
+  media.pcm = meta;
   post({ type: 'audioReady', ...meta, cached: false });
 }
 // Fallback: main thread decoded audio (decodeAudioData) for codecs AudioDecoder lacks; persist it the same way.
@@ -460,31 +493,45 @@ async function writePCM({ key, sampleRate, channels }) {
   }
   h.flush(); h.close();
   const meta = { key, sampleRate, channels: ch, frames: len, peaks: Array.from(peaks), complete: true };
-  await writeMeta(key, meta); W.pcm = meta;
+  await writeMeta(key, meta);
+  for (const c of W.clips) if (c.media.key === key) c.media.pcm = meta;
   post({ type: 'audioReady', ...meta, cached: false });
 }
 
 function frame({ t, fx, playing }) {
-  if (!W.src || W.exporting) return;
-  const f = W.src.peek(Math.min(t, W.media.dur - 1));
-  if (f) W.comp.draw(f, t / 1e6, fx);
+  if (!W.clips.length || W.exporting || W.audioBlocking) return;
+  const c = clipAt(t);
+  if (c !== W.cur) { // crossed into another clip
+    W.cur = c;
+    if (!c.fs) ensureFS(c, Math.max(0, t - c.start));
+  }
+  // Pre-roll the next clip's decoder ~1.5 s before the cut so the transition is seamless
+  const i = W.clips.indexOf(c), next = W.clips[i + 1];
+  const nearEnd = next && playing && t > c.start + c.media.dur - 1.5e6;
+  if (nearEnd && !next.fs) ensureFS(next, 0);
+  dropFS(nearEnd ? [c, next] : [c]);
+  const local = Math.min(Math.max(0, t - c.start), c.media.dur - 1);
+  const f = c.fs.peek(local);
+  if (f) W.comp.draw(f, t / 1e6, fx, c);
   else if (playing) W.late++;
   stats();
 }
 
 // Streams the output mix block-by-block: source PCM (varispeed resample) × gain × ducking + voice-over.
-async function exportJob({ inT, outT, fx, gain, speed = 1, vo = [], duck = 1, voGain = 1, format = 'mp4' }) {
-  const m = W.media; if (!m || W.exporting) return;
+async function exportJob({ inT, outT, fx, gain, speed = 1, vo = [], duck = 1, voGain = 1 }) {
+  if (!W.clips.length || W.exporting) return;
   W.exporting = true;
+  dropFS([]); // free preview decoders; export opens one clip at a time
+  const m = W.clips[0].media;
   const canvas = W.comp.canvas, Wd = canvas.width, H = canvas.height, fps = m.fps;
-  let xsrc, pcmH, outH;
+  const handles = [];
+  let xsrc, xclip = null, outH;
   try {
-    const pcm = W.pcm && W.pcm.key === m.key ? W.pcm : null;
-    const sr = pcm?.sampleRate ?? 48000, ch = pcm?.channels ?? 2;
-    const hasAudio = !!pcm || vo.length > 0;
+    const withPcm = W.clips.filter((c) => c.media.pcm);
+    const sr = 48000, ch = 2; // fixed output format; each clip is resampled into it
+    const hasAudio = withPcm.length > 0 || vo.length > 0;
     const venc = await pickVideoEncoder(Wd, H, fps);
     const aenc = hasAudio ? await pickAudioEncoder(sr, ch) : null;
-    // Output streams straight to OPFS — the finished file never sits in memory
     const dir = await opfsDir('exports');
     for await (const [n] of dir.entries()) { try { await dir.removeEntry(n); } catch {} }
     const outName = `export-${Date.now()}.mp4`;
@@ -503,28 +550,38 @@ async function exportJob({ inT, outT, fx, gain, speed = 1, vo = [], duck = 1, vo
       post({ type: 'progress', pct: 0, msg: `Mixing + encoding audio (${aenc.label}) from disk…` });
       const ae = new AudioEncoder({ output: (c, meta) => muxer.addAudioChunk(c, meta), error: (e) => (err = e) });
       ae.configure(aenc.cfg);
-      if (pcm) pcmH = await (await (await opfsDir('cache')).getFileHandle(pcm.key + '.f32')).createSyncAccessHandle();
-      const s0 = (inT / 1e6) * sr, srcEnd = pcm ? Math.min(pcm.frames, (outT / 1e6) * sr) : 0;
+      const cache = await opfsDir('cache');
+      const segs = [];
+      for (const c of withPcm) {
+        const h = await (await cache.getFileHandle(c.media.pcm.key + '.f32')).createSyncAccessHandle();
+        handles.push(h);
+        segs.push({ start: c.start, end: c.start + c.media.dur, pcm: c.media.pcm, h });
+      }
       const outLen = Math.max(1, Math.round(((outT - inT) / speed / 1e6) * sr));
-      // voice-over clips in output-sample coordinates
+      const seqAt = (i) => inT + (i * speed * 1e6) / sr; // output sample → sequence µs
       const clips = vo.map((c) => ({ s: Math.round(((c.start - inT) / speed / 1e6) * sr), ratio: c.sampleRate / sr, chans: c.channels, n: Math.round((c.channels[0].length / c.sampleRate) * sr) }));
       const ramp = Math.round(0.15 * sr);
       const env = (i) => { let e = 1; for (const c of clips) { const k = i < c.s - ramp || i >= c.s + c.n + ramp ? 1 : i < c.s ? 1 - (i - (c.s - ramp)) / ramp : i >= c.s + c.n ? (i - (c.s + c.n)) / ramp : 0; e = Math.min(e, duck + (1 - duck) * k); } return e; };
       const BLK = 1024;
       for (let o = 0; o < outLen; o += BLK) {
         const n = Math.min(BLK, outLen - o), data = new Float32Array(n * ch);
-        if (pcm) {
-          const a = Math.floor(s0 + o * speed), b = Math.min(pcm.frames, Math.floor(s0 + (o + n) * speed) + 2);
-          if (b > a) {
-            const win = new Float32Array(b - a > 0 ? (b - a) * ch : 0);
-            pcmH.read(win, { at: a * ch * 4 });
-            for (let i = 0; i < n; i++) {
-              const x = s0 + (o + i) * speed; if (x >= srcEnd) break;
-              const k = Math.floor(x) - a, f = x - Math.floor(x), g = gain * env(o + i);
-              for (let c = 0; c < ch; c++) {
-                const v0 = win[k * ch + c] ?? 0, v1 = win[(k + 1) * ch + c] ?? v0;
-                data[c * n + i] = (v0 * (1 - f) + v1 * f) * g;
-              }
+        const t0 = seqAt(o), t1 = seqAt(o + n);
+        for (const sg of segs) {
+          if (sg.end <= t0 || sg.start >= t1) continue;
+          const p = sg.pcm, pc = p.channels, rate = p.sampleRate;
+          const i0 = Math.max(0, Math.ceil(((sg.start - inT) / speed / 1e6) * sr) - o), i1 = Math.min(n, Math.ceil(((sg.end - inT) / speed / 1e6) * sr) - o);
+          if (i1 <= i0) continue;
+          const xAt = (i) => ((seqAt(o + i) - sg.start) / 1e6) * rate; // source frame (fractional)
+          const a = Math.max(0, Math.floor(xAt(i0))), b = Math.min(p.frames, Math.floor(xAt(i1 - 1)) + 2);
+          if (b <= a) continue;
+          const win = new Float32Array((b - a) * pc);
+          sg.h.read(win, { at: a * pc * 4 });
+          for (let i = i0; i < i1; i++) {
+            const x = xAt(i), k = Math.floor(x) - a, f = x - Math.floor(x), g = gain * env(o + i);
+            if (k < 0 || k >= b - a) continue;
+            for (let c = 0; c < ch; c++) {
+              const sc = Math.min(c, pc - 1), v0 = win[k * pc + sc], v1 = k + 1 < b - a ? win[(k + 1) * pc + sc] : v0;
+              data[c * n + i] = (v0 * (1 - f) + v1 * f) * g;
             }
           }
         }
@@ -542,18 +599,18 @@ async function exportJob({ inT, outT, fx, gain, speed = 1, vo = [], duck = 1, vo
         if ((o / BLK) % 200 === 0) post({ type: 'progress', pct: (o / outLen) * 20, msg: `Mixing + encoding audio (${aenc.label}) from disk… ${Math.round((o / outLen) * 100)}%` });
       }
       await ae.flush(); ae.close();
-      pcmH?.close(); pcmH = null;
+      for (const h of handles.splice(0)) h.close();
     }
-    xsrc = new FrameSource(m, m.config, 4);
-    xsrc.seek(inT);
-    const total = Math.max(1, Math.round((outT - inT) / speed / m.frameDur));
+    const total = Math.max(1, Math.round((outT - inT) / speed / (1e6 / fps)));
     const gop = Math.round(fps * 2), dur = Math.round(1e6 / fps), started = performance.now();
     const ve = new VideoEncoder({ output: (c, meta) => muxer.addVideoChunk(c, meta), error: (e) => (err = e) });
     ve.configure(venc.cfg);
     for (let n = 0; n < total; n++) {
-      const ts = Math.round((n * 1e6) / fps), tSrc = inT + Math.round(ts * speed);
-      const f = await xsrc.frameAt(Math.min(tSrc, m.dur - 1));
-      if (f) W.comp.draw(f, tSrc / 1e6, fx);
+      const ts = Math.round((n * 1e6) / fps), tSeq = Math.min(inT + Math.round(ts * speed), W.seqDur - 1);
+      const c = clipAt(tSeq), local = Math.min(Math.max(0, tSeq - c.start), c.media.dur - 1);
+      if (c !== xclip) { xsrc?.close(); xclip = c; xsrc = new FrameSource(c.media, c.media.config, 4); xsrc.seek(local); }
+      const f = await xsrc.frameAt(local);
+      if (f) W.comp.draw(f, tSeq / 1e6, fx, c);
       const vf = new VideoFrame(canvas, { timestamp: ts, duration: dur });
       while (ve.encodeQueueSize > 4) await drained(ve);
       ve.encode(vf, { keyFrame: n % gop === 0 });
@@ -561,27 +618,29 @@ async function exportJob({ inT, outT, fx, gain, speed = 1, vo = [], duck = 1, vo
       if (err) throw err;
       if (n % 5 === 0) {
         const rate = (n + 1) / ((performance.now() - started) / 1000);
-        post({ type: 'progress', pct: (aenc ? 20 : 0) + ((n + 1) / total) * (aenc ? 80 : 100), t: tSrc, msg: `${labels} · frame ${n + 1}/${total} · ${rate.toFixed(0)} fps · ${(written / 1e6).toFixed(1)} MB written to disk` });
+        const clipNo = W.clips.length > 1 ? ` · clip ${W.clips.indexOf(c) + 1}/${W.clips.length}` : '';
+        post({ type: 'progress', pct: (aenc ? 20 : 0) + ((n + 1) / total) * (aenc ? 80 : 100), t: tSeq, msg: `${labels}${clipNo} · frame ${n + 1}/${total} · ${rate.toFixed(0)} fps · ${(written / 1e6).toFixed(1)} MB written to disk` });
       }
     }
     await ve.flush(); ve.close();
     muxer.finalize();
     outH.flush(); outH.close(); outH = null;
-    post({ type: 'exported', name: outName, size: written, frames: total, labels, video: venc.label, audio: aenc?.label ?? null, secs: (performance.now() - started) / 1000 });
+    post({ type: 'exported', name: outName, size: written, frames: total, labels, video: venc.label, audio: aenc?.label ?? null, secs: (performance.now() - started) / 1000, clips: W.clips.length });
   } catch (e) {
     post({ type: 'exportError', message: e.message || String(e) });
   } finally {
-    try { pcmH?.close(); } catch {}
+    for (const h of handles) { try { h.close(); } catch {} }
     try { outH?.close(); } catch {}
     xsrc?.close();
     W.exporting = false;
+    seekSeq(W.lastT || 0);
   }
 }
 
 async function clearStorage() {
   const root = await navigator.storage.getDirectory();
   for (const d of ['cache', 'exports']) { try { await root.removeEntry(d, { recursive: true }); } catch {} }
-  W.pcm = null;
+  for (const c of W.clips) c.media.pcm = null;
   post({ type: 'storageCleared' });
 }
 
@@ -591,10 +650,22 @@ self.onmessage = ({ data: m }) => {
       try { W.comp = new Compositor(m.canvas); post({ type: 'ready', webcodecs: 'VideoDecoder' in self && 'VideoEncoder' in self }); }
       catch (e) { post({ type: 'error', message: e.message }); }
       break;
-    case 'load': load(m.file, m.name).catch((e) => post({ type: 'needsFallback', reason: 'codec', detail: e.message })); break;
+    case 'load': load(m.file, m.name, m.append).catch((e) => post({ type: 'needsFallback', reason: 'codec', detail: e.message })); break;
     case 'writePCM': writePCM(m).catch((e) => post({ type: 'audioUnsupported', key: m.key, reason: e.message })); break;
-    case 'seek': W.lastT = m.t; W.src?.seek(m.t); break;
-    case 'rotate': if (!W.exporting) { W.extraRot = (W.extraRot + 90) % 360; applyRotation(); W.src?.seek(m.t ?? 0); } break;
+    case 'seek': seekSeq(m.t); break;
+    case 'rotate': if (!W.exporting && W.clips.length) { const c = clipAt(m.t ?? 0); c.extraRot = (c.extraRot + 90) % 360; applyRotation(); postClips(); seekSeq(m.t ?? 0); } break;
+    case 'removeClip': if (!W.exporting) {
+      const i = W.clips.findIndex((c) => c.id === m.id); if (i < 0) break;
+      const [c] = W.clips.splice(i, 1); c.fs?.close(); c.media.audioWorker?.terminate();
+      if (W.cur === c) W.cur = null;
+      if (W.clips.length) applyRotation(); else W.media = null;
+      postClips(); if (W.clips.length) seekSeq(Math.min(W.lastT || 0, W.seqDur - 1));
+    } break;
+    case 'moveClip': if (!W.exporting) {
+      const i = W.clips.findIndex((c) => c.id === m.id), j = i + m.dir; if (i < 0 || j < 0 || j >= W.clips.length) break;
+      [W.clips[i], W.clips[j]] = [W.clips[j], W.clips[i]];
+      applyRotation(); postClips(); seekSeq(W.lastT || 0);
+    } break;
     case 'frame': frame(m); break;
     case 'export': exportJob(m); break;
     case 'clearStorage': clearStorage(); break;
