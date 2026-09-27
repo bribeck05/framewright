@@ -23,3 +23,6 @@ python3 -m http.server 8123
 Then open http://localhost:8123. Requires a Chromium-based browser or another browser with WebCodecs support.
 
 
+
+## License
+MIT for Framewright's own code; see `LICENSE`. The bundled FFmpeg.wasm core is GPL-2.0-or-later; see `THIRD_PARTY_NOTICES.md`.
