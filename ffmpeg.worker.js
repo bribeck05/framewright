@@ -5,8 +5,9 @@ let logs = [];
 
 async function load() {
   if (core) return core;
-  const coreURL = new URL('./ffmpeg/ffmpeg-core.js', self.location).href;
-  const wasmURL = new URL('./ffmpeg/ffmpeg-core.wasm', self.location).href;
+  // Fetched from a CDN at runtime (not bundled): @ffmpeg/core is a GPL build, the rest of the app is MIT
+  const CORE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm';
+  const coreURL = `${CORE}/ffmpeg-core.js`, wasmURL = `${CORE}/ffmpeg-core.wasm`;
   post({ type: 'status', msg: 'Loading FFmpeg.wasm core (~32 MB, cached after first use)…' });
   const { default: createFFmpegCore } = await import(coreURL);
   core = await createFFmpegCore({ mainScriptUrlOrBlob: `${coreURL}#${btoa(JSON.stringify({ wasmURL }))}` });

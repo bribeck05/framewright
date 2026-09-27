@@ -25,4 +25,4 @@ Then open http://localhost:8123. Requires a Chromium-based browser or another br
 
 
 ## License
-MIT for Framewright's own code; see `LICENSE`. The bundled FFmpeg.wasm core is GPL-2.0-or-later; see `THIRD_PARTY_NOTICES.md`.
+MIT; see `LICENSE`. Libraries fetched at runtime keep their own licenses; see `THIRD_PARTY_NOTICES.md`.
