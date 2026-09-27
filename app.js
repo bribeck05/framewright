@@ -52,7 +52,7 @@ engine.onmessage = ({ data: m }) => {
     case 'ready': if (!m.webcodecs) toast('This browser lacks WebCodecs in workers. Use a recent Chrome, Edge, or Safari 26+.'); break;
     case 'loaded': case 'needsFallback': loadWaiter?.(m); loadWaiter = null; break;
     case 'stats': S.stats = m; break;
-    case 'rotated': S.rot = m; updateStats(); window.__rot = m; break;
+    case 'rotated': S.rot = m; document.documentElement.style.setProperty('--ar', `${m.width} / ${m.height}`); updateStats(); window.__rot = m; break;
     case 'progress': setProgress(m.pct); setStatus(m.msg); if (m.t != null) { $('tc').textContent = `${fmt(m.t)} / ${fmt(S.dur)}`; positionPlayhead(m.t); } break;
     case 'exported': onExported(m); break;
     case 'exportError': onExportError(m.message); break;
@@ -272,8 +272,8 @@ function scrubAt(clientX) {
 $('timeline').addEventListener('pointerdown', (e) => {
   if (!S.meta || S.exporting || S.busy) return;
   scrubAt(e.clientX);
-  const mv = (ev) => scrubAt(ev.clientX), up = () => { removeEventListener('pointermove', mv); removeEventListener('pointerup', up); };
-  addEventListener('pointermove', mv); addEventListener('pointerup', up);
+  const mv = (ev) => scrubAt(ev.clientX), up = () => { removeEventListener('pointermove', mv); removeEventListener('pointerup', up); removeEventListener('pointercancel', up); };
+  addEventListener('pointermove', mv); addEventListener('pointerup', up); addEventListener('pointercancel', up);
 });
 addEventListener('resize', () => { drawWave(); layoutTimeline(); });
 for (const id of ['titleText', 'titleStart', 'titleEnd']) $(id).addEventListener('input', layoutTimeline);
@@ -461,7 +461,9 @@ function exportVideo() {
   if (!S.meta || S.exporting || S.busy) return;
   if (S.meta.hasAudio && !S.pcm && !/unsupported|cleared/.test(S.audioStatus || '')) { toast('Audio is still being decoded to disk. Export will be available in a moment.'); return; }
   pause(); S.exporting = true; setBusy(true);
-  showExportBox(); $('download').hidden = true; $('result').hidden = true; setProgress(0);
+  showExportBox();
+  // On phones the progress box sits far below the header button; bring it into view
+  if (matchMedia('(max-width:860px)').matches) $('exportBox').scrollIntoView({ behavior: 'smooth', block: 'center' }); $('download').hidden = true; $('result').hidden = true; setProgress(0);
   exportStarted = performance.now();
   // Audio is mixed in the worker, streaming from the OPFS PCM cache; only small voice-over clips are sent
   const vo = S.vo.filter((c) => !c.muted).map((c) => ({ start: c.start, sampleRate: c.buffer.sampleRate,

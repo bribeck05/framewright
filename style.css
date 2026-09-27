@@ -27,7 +27,7 @@ body{background:var(--bg);color:var(--text);font:14px/1.45 var(--font);display:f
 .empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;text-align:center;padding:20px;background:#0b0b0b}
 .transport{display:flex;align-items:center;gap:10px}
 .spacer{flex:1}
-.timeline{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 0;user-select:none;cursor:pointer}
+.timeline{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 0;user-select:none;cursor:pointer;touch-action:pan-y}
 .track{display:flex;align-items:center;height:34px}
 .tlabel{width:40px;text-align:center;color:var(--muted);font:500 11px var(--mono)}
 .lane{position:relative;flex:1;height:26px;margin-right:12px;background:#151515;border-radius:4px}
@@ -67,3 +67,35 @@ select.btn{appearance:none;padding-right:14px}
 .volist{list-style:none;padding:0;display:flex;flex-direction:column;gap:6px}
 .volist li{display:flex;justify-content:space-between;align-items:center;gap:6px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
 @media (prefers-reduced-motion:reduce){.btn.rec.recording{animation:none}}
+
+/* ---------- Phone layout (≤ 600px) ---------- */
+@media (max-width:600px){
+  .bar{flex-wrap:wrap;gap:10px;padding:10px 12px}
+  .brand{font-size:15px}
+  .actions{width:100%;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .actions > *{justify-content:center;min-height:44px}
+  #demo{order:1}#format{order:2}
+  .stage{padding:10px 12px;gap:8px}
+  .viewer{flex:none;min-height:0;aspect-ratio:var(--ar,16/9);max-height:52vh;width:100%}
+  .transport{flex-wrap:wrap;gap:8px}
+  .transport .spacer{display:none}
+  #play{width:44px;height:44px}
+  #tc{font-size:12px;white-space:nowrap}
+  .speed{margin-left:auto}
+  .transport .btn.small{flex:1;min-height:40px;justify-content:center;font-size:13px}
+  #speed{min-height:40px}
+  .track{height:40px}
+  .lane{height:30px;margin-right:8px}
+  .tlabel{width:34px}
+  .panel{padding:14px 12px 28px}
+  .panel .btn{min-height:44px;justify-content:center}
+  input[type=range]{height:32px}
+  input[type=checkbox]{width:20px;height:20px}
+  .toast{left:12px;right:12px;transform:none;text-align:center}
+}
+@media (max-width:860px){
+  html,body{height:auto}
+  body{min-height:100%}
+  .layout{display:block}
+  .panel{overflow:visible}
+}
