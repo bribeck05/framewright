@@ -93,6 +93,7 @@ function resetEmpty() {
   $('tc').textContent = '00:00.000 / 00:00.000';
   drawWave(); layoutTimeline(); renderClipList();
 }
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
 const clipAt = (t) => S.clips.find((c) => t < c.start + c.dur) || S.clips[S.clips.length - 1];
 
 // ---------------------------------------------------------------- Loading with FFmpeg.wasm fallback
@@ -297,7 +298,7 @@ function layoutTimeline() {
   bar.textContent = ti.text;
   // V1: one segment per clip, butted end to end
   const lane = $('v1Lane'), fd = S.clips.length > 1 ? +$('fade').value * 1e6 / 2 : 0;
-  lane.innerHTML = S.clips.map((c, i) => `<div class="clip video${i % 2 ? ' alt' : ''}" style="left:${(c.start / S.dur) * 100}%;width:${(c.dur / S.dur) * 100}%" title="${c.name}">${c.name}</div>`).join('') + (fd ? S.clips.slice(1).map((c) => `<div class="fade-mark" style="left:${((c.start - fd) / S.dur) * 100}%;width:${((2 * fd) / S.dur) * 100}%" title="Fade"></div>`).join('') : '');
+  lane.innerHTML = S.clips.map((c, i) => `<div class="clip video${i % 2 ? ' alt' : ''}" style="left:${(c.start / S.dur) * 100}%;width:${(c.dur / S.dur) * 100}%" title="${esc(c.name)}">${esc(c.name)}</div>`).join('') + (fd ? S.clips.slice(1).map((c) => `<div class="fade-mark" style="left:${((c.start - fd) / S.dur) * 100}%;width:${((2 * fd) / S.dur) * 100}%" title="Fade"></div>`).join('') : '');
   layoutVoLane();
 }
 function drawWave() {
@@ -323,10 +324,10 @@ function renderClipList() {
   if (!S.clips.length) { el.innerHTML = '<p class="muted small">No clips yet. Open a video, then use Add video to append more.</p>'; return; }
   el.innerHTML = S.clips.map((c, i) => `<div class="clip-row">
     <span class="clip-idx mono">${i + 1}</span>
-    <span class="clip-name" title="${c.name}">${c.name}<small class="mono">${fmt(c.dur)} · ${c.width}×${c.height}${c.rotation ? ' · ' + c.rotation + '°' : ''}</small></span>
-    <button class="btn small" data-a="up" data-id="${c.id}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${c.name} earlier">↑</button>
-    <button class="btn small" data-a="down" data-id="${c.id}" ${i === S.clips.length - 1 ? 'disabled' : ''} aria-label="Move ${c.name} later">↓</button>
-    <button class="btn small" data-a="rm" data-id="${c.id}" aria-label="Remove ${c.name}">✕</button></div>`).join('');
+    <span class="clip-name" title="${esc(c.name)}">${esc(c.name)}<small class="mono">${fmt(c.dur)} · ${c.width}×${c.height}${c.rotation ? ' · ' + c.rotation + '°' : ''}</small></span>
+    <button class="btn small" data-a="up" data-id="${c.id}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(c.name)} earlier">↑</button>
+    <button class="btn small" data-a="down" data-id="${c.id}" ${i === S.clips.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(c.name)} later">↓</button>
+    <button class="btn small" data-a="rm" data-id="${c.id}" aria-label="Remove ${esc(c.name)}">✕</button></div>`).join('');
 }
 $('fade').addEventListener('input', () => { $('fadeVal').textContent = (+$('fade').value).toFixed(1) + ' s'; layoutTimeline(); if (!S.playing) engine.postMessage({ type: 'frame', t: S.pos, fx: fx(), playing: false }); });
 $('clipList').addEventListener('click', (e) => {
@@ -377,7 +378,7 @@ function updateStats() {
     ['Decoded', st.decoded ?? 0], ['Seek-skipped', st.dropped ?? 0], ['Late ticks', st.late ?? 0],
     ['Trim', `${fmt(S.inT)} → ${fmt(S.outT)}`], ['Voice-over', `${S.vo.length} clip(s)`], ['Speed', `${S.speed}× → ${fmt((S.outT - S.inT) / S.speed)} out`],
   ];
-  $('stats').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd title="${v}">${v}</dd>`).join('');
+  $('stats').innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd title="${esc(v)}">${esc(v)}</dd>`).join('');
 }
 
 function setSpeed(v) {
