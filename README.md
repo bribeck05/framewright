@@ -21,3 +21,5 @@ python3 -m http.server 8123
 ```
 
 Then open http://localhost:8123. Requires a Chromium-based browser or another browser with WebCodecs support.
+
+
