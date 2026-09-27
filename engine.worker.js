@@ -385,6 +385,8 @@ async function load(file, name, append) {
   const t = media.track;
   const last = media.samples.reduce((m, s) => Math.max(m, ((s.cts + s.duration) * 1e6) / s.timescale), 0);
   media.dur = Math.round(last);
+  // First presented frame can start after 0 (edit lists / B-frame delay); clamp lookups to it
+  media.t0 = Math.round(media.samples.reduce((m, s) => Math.min(m, (s.cts * 1e6) / s.timescale), Infinity));
   // Nominal fps from the most common sample duration (robust to B-frame CTS offsets / edit lists)
   const hist = new Map(); for (const s of media.samples) hist.set(s.duration, (hist.get(s.duration) || 0) + 1);
   const common = [...hist.entries()].sort((a, b) => b[1] - a[1])[0][0];
@@ -519,7 +521,7 @@ function frame({ t, fx, playing }) {
   const nearEnd = next && playing && t > c.start + c.media.dur - 1.5e6;
   if (nearEnd && !next.fs) ensureFS(next, 0);
   dropFS(nearEnd ? [c, next] : [c]);
-  const local = Math.min(Math.max(0, t - c.start), c.media.dur - 1);
+  const local = Math.min(Math.max(c.media.t0 || 0, t - c.start), c.media.dur - 1);
   const f = c.fs.peek(local);
   if (f) W.comp.draw(f, t / 1e6, fx, c);
   else if (playing) W.late++;
@@ -617,7 +619,7 @@ async function exportJob({ inT, outT, fx, gain, speed = 1, vo = [], duck = 1, vo
     ve.configure(venc.cfg);
     for (let n = 0; n < total; n++) {
       const ts = Math.round((n * 1e6) / fps), tSeq = Math.min(inT + Math.round(ts * speed), W.seqDur - 1);
-      const c = clipAt(tSeq), local = Math.min(Math.max(0, tSeq - c.start), c.media.dur - 1);
+      const c = clipAt(tSeq), local = Math.min(Math.max(c.media.t0 || 0, tSeq - c.start), c.media.dur - 1);
       if (c !== xclip) { xsrc?.close(); xclip = c; xsrc = new FrameSource(c.media, c.media.config, 4); xsrc.seek(local); }
       const f = await xsrc.frameAt(local);
       if (f) W.comp.draw(f, tSeq / 1e6, fx, c);
