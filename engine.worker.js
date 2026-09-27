@@ -147,7 +147,7 @@ const FS_GRADE = `#version 300 es
 precision highp float;
 in vec2 v; out vec4 o;
 uniform sampler2D uTex; uniform vec2 uRes;
-uniform float uB, uC, uS, uT, uV, uG, uSeed; uniform int uRot; uniform vec2 uFit;
+uniform float uB, uC, uS, uT, uV, uG, uSeed; uniform int uRot; uniform vec2 uFit; uniform float uK;
 float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233)) + uSeed) * 43758.5453); }
 void main(){
   // Map output UV → source UV for the display rotation (clockwise quarter turns)
@@ -164,7 +164,7 @@ void main(){
   vec2 d = v - .5; d.x *= uRes.x / uRes.y;
   c *= mix(1., smoothstep(.95, .25, length(d)), uV);
   c += (hash(floor(v*uRes)) - .5) * uG;
-  o = vec4(clamp(c, 0., 1.), 1.);
+  o = vec4(clamp(c, 0., 1.) * uK, 1.); // uK: dip-to-black transition level
 }`;
 const FS_OVER = `#version 300 es
 precision highp float;
@@ -250,6 +250,7 @@ class Compositor {
     gl.uniform1i(g.u.uRot, q);
     // fit the clip's displayed (rotated) size into the output canvas
     const dw = clip ? clip.dw : W, dh = clip ? clip.dh : H, k = Math.min(W / dw, H / dh);
+    gl.uniform1f(g.u.uK, clip ? fadeK(t * 1e6, fx.fade) : 1);
     gl.uniform2f(g.u.uFit, Math.min(1, (dw * k) / W), Math.min(1, (dh * k) / H));
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     // Layer 1: title with keyframed opacity + rise
@@ -319,6 +320,14 @@ function applyRotation() {
 // W.clips is the sequence: clips play back to back; each has its own demuxed media, PCM cache,
 // and (only while near the playhead) its own FrameSource, so at most two VideoDecoders are live.
 const W = { comp: null, media: null, clips: [], cur: null, clipSeq: 0, late: 0, exporting: false, lastStats: 0, lastT: 0 };
+// Transition level at sequence time t (µs): dips to black over `fade` seconds centred on each cut.
+function fadeK(t, fade) {
+  if (!fade || W.clips.length < 2) return 1;
+  const c = clipAt(t), i = W.clips.indexOf(c), half = (fade * 1e6) / 2;
+  const dIn = i > 0 ? t - c.start : Infinity, dOut = i < W.clips.length - 1 ? c.start + c.media.dur - t : Infinity;
+  const k = Math.min(1, Math.max(0, Math.min(dIn, dOut) / half));
+  return k * k * (3 - 2 * k); // smoothstep
+}
 function relayout() { let t = 0; for (const c of W.clips) { c.start = t; t += c.media.dur; } W.seqDur = t; }
 function clipAt(t) { const cs = W.clips; for (const c of cs) if (t < c.start + c.media.dur) return c; return cs[cs.length - 1]; }
 function ensureFS(c, local = 0) { if (!c.fs) { c.fs = new FrameSource(c.media, c.media.config); c.fs.seek(local); } return c.fs; }
@@ -551,10 +560,11 @@ async function exportJob({ inT, outT, fx, gain, speed = 1, vo = [], duck = 1, vo
       const ae = new AudioEncoder({ output: (c, meta) => muxer.addAudioChunk(c, meta), error: (e) => (err = e) });
       ae.configure(aenc.cfg);
       const cache = await opfsDir('cache');
-      const segs = [];
+      const segs = [], byKey = new Map();
       for (const c of withPcm) {
-        const h = await (await cache.getFileHandle(c.media.pcm.key + '.f32')).createSyncAccessHandle();
-        handles.push(h);
+        // The same file can appear more than once in a sequence; OPFS allows one sync handle per file
+        let h = byKey.get(c.media.pcm.key);
+        if (!h) { h = await (await cache.getFileHandle(c.media.pcm.key + '.f32')).createSyncAccessHandle(); handles.push(h); byKey.set(c.media.pcm.key, h); }
         segs.push({ start: c.start, end: c.start + c.media.dur, pcm: c.media.pcm, h });
       }
       const outLen = Math.max(1, Math.round(((outT - inT) / speed / 1e6) * sr));
@@ -577,7 +587,7 @@ async function exportJob({ inT, outT, fx, gain, speed = 1, vo = [], duck = 1, vo
           const win = new Float32Array((b - a) * pc);
           sg.h.read(win, { at: a * pc * 4 });
           for (let i = i0; i < i1; i++) {
-            const x = xAt(i), k = Math.floor(x) - a, f = x - Math.floor(x), g = gain * env(o + i);
+            const x = xAt(i), k = Math.floor(x) - a, f = x - Math.floor(x), g = gain * env(o + i) * fadeK(seqAt(o + i), fx.fade);
             if (k < 0 || k >= b - a) continue;
             for (let c = 0; c < ch; c++) {
               const sc = Math.min(c, pc - 1), v0 = win[k * pc + sc], v1 = k + 1 < b - a ? win[(k + 1) * pc + sc] : v0;

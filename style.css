@@ -111,3 +111,7 @@ select.btn{appearance:none;padding-right:14px}
   #export{grid-column:1 / -1}
   .clip-row .btn.small{min-width:40px;min-height:40px}
 }
+.fade-mark{position:absolute;top:0;bottom:0;pointer-events:none;background:linear-gradient(90deg,transparent,rgba(0,0,0,.75) 50%,transparent)}
+.fade-row{display:block;margin-top:10px;font-size:13px}
+.fade-row span{float:right;color:var(--muted)}
+.fade-row input{width:100%;display:block;margin-top:6px}

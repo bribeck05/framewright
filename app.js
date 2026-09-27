@@ -42,6 +42,7 @@ window.__S = S; window.__engine = engine;
 const fx = () => ({
   brightness: +$('brightness').value, contrast: +$('contrast').value, saturation: +$('saturation').value,
   temperature: +$('temperature').value, vignette: +$('vignette').value, grain: +$('grain').value,
+  fade: S.clips.length > 1 ? +$('fade').value : 0,
   title: { text: $('titleText').value, start: +$('titleStart').value, end: +$('titleEnd').value, y: +$('titleY').value },
 });
 
@@ -199,8 +200,17 @@ async function readSegment(c, frame, n) {
   const f = new Float32Array(await c.pcmFile.slice(frame * ch * 4, (frame + n) * ch * 4).arrayBuffer());
   const len = f.length / ch; if (!len) return null;
   const buf = S.audioCtx.createBuffer(ch, len, p.sampleRate);
-  for (let k = 0; k < ch; k++) { const d = buf.getChannelData(k); for (let i = 0; i < len; i++) d[i] = f[i * ch + k]; }
+  const fade = fx().fade, sr = p.sampleRate;
+  for (let k = 0; k < ch; k++) { const d = buf.getChannelData(k); for (let i = 0; i < len; i++) d[i] = f[i * ch + k] * (fade ? fadeK(c.start + ((frame + i) / sr) * 1e6, fade) : 1); }
   return buf;
+}
+// Same curve as the engine: audio dips with the picture at each cut
+function fadeK(t, fade) {
+  if (!fade || S.clips.length < 2) return 1;
+  const c = clipAt(t), i = S.clips.indexOf(c), half = (fade * 1e6) / 2;
+  const dIn = i > 0 ? t - c.start : Infinity, dOut = i < S.clips.length - 1 ? c.start + c.dur - t : Infinity;
+  const k = Math.min(1, Math.max(0, Math.min(dIn, dOut) / half));
+  return k * k * (3 - 2 * k);
 }
 // Walk the sequence clip by clip, keeping ~2 s of audio scheduled ahead on the AudioContext clock.
 // Clips without (ready) audio just advance the schedule by their length, i.e. silence.
@@ -286,8 +296,8 @@ function layoutTimeline() {
   bar.style.left = (s / S.dur) * 100 + '%'; bar.style.width = ((e - s) / S.dur) * 100 + '%';
   bar.textContent = ti.text;
   // V1: one segment per clip, butted end to end
-  const lane = $('v1Lane');
-  lane.innerHTML = S.clips.map((c, i) => `<div class="clip video${i % 2 ? ' alt' : ''}" style="left:${(c.start / S.dur) * 100}%;width:${(c.dur / S.dur) * 100}%" title="${c.name}">${c.name}</div>`).join('');
+  const lane = $('v1Lane'), fd = S.clips.length > 1 ? +$('fade').value * 1e6 / 2 : 0;
+  lane.innerHTML = S.clips.map((c, i) => `<div class="clip video${i % 2 ? ' alt' : ''}" style="left:${(c.start / S.dur) * 100}%;width:${(c.dur / S.dur) * 100}%" title="${c.name}">${c.name}</div>`).join('') + (fd ? S.clips.slice(1).map((c) => `<div class="fade-mark" style="left:${((c.start - fd) / S.dur) * 100}%;width:${((2 * fd) / S.dur) * 100}%" title="Fade"></div>`).join('') : '');
   layoutVoLane();
 }
 function drawWave() {
@@ -318,6 +328,7 @@ function renderClipList() {
     <button class="btn small" data-a="down" data-id="${c.id}" ${i === S.clips.length - 1 ? 'disabled' : ''} aria-label="Move ${c.name} later">↓</button>
     <button class="btn small" data-a="rm" data-id="${c.id}" aria-label="Remove ${c.name}">✕</button></div>`).join('');
 }
+$('fade').addEventListener('input', () => { $('fadeVal').textContent = (+$('fade').value).toFixed(1) + ' s'; layoutTimeline(); if (!S.playing) engine.postMessage({ type: 'frame', t: S.pos, fx: fx(), playing: false }); });
 $('clipList').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-a]'); if (!b || S.exporting || S.busy) return;
   pause();
