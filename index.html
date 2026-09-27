@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Framewright — WebCodecs Editor Prototype</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='7' width='26' height='18' rx='3' fill='none' stroke='%23e8a33d' stroke-width='3'/%3E%3Cpath d='M13 12l7 4-7 4z' fill='%23e8a33d'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://api.fontshare.com">
+<link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600&f[]=jet-brains-mono@400,500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <svg aria-label="Framewright" viewBox="0 0 32 32" width="26" height="26" fill="none">
+      <rect x="3" y="7" width="26" height="18" rx="3" stroke="currentColor" stroke-width="2.5"/>
+      <path d="M9 7v18M23 7v18" stroke="currentColor" stroke-width="1.5" opacity=".5"/>
+      <path d="M14 12.5l5 3.5-5 3.5z" fill="currentColor"/>
+    </svg>
+    <span>Framewright</span><small>WebCodecs + Workers + FFmpeg.wasm</small>
+  </div>
+  <div class="actions">
+    <label id="fileLabel" class="btn ghost">Open video<input id="file" type="file" accept="video/*,.mkv,.avi,.mov,.webm,.ts,.flv" hidden></label>
+    <button id="demo" class="btn ghost">Load demo clip</button>
+    <select id="format" class="btn ghost" aria-label="Export format"><option value="mp4">MP4</option><option value="mov">MOV (FFmpeg)</option><option value="mkv">MKV (FFmpeg)</option></select>
+    <button id="export" class="btn primary" disabled>Export</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="stage">
+    <div class="viewer">
+      <canvas id="view" width="1280" height="720"></canvas>
+      <div id="empty" class="empty">
+        <p>Open a video or load the demo clip.</p>
+        <p class="muted">MP4/MOV go straight to WebCodecs. WebM, MKV, AVI and unsupported codecs fall back to FFmpeg.wasm.</p>
+        <p class="muted">Decoding, compositing and encoding run in Web Workers, entirely in your browser.</p>
+      </div>
+    </div>
+    <div class="transport">
+      <button id="play" class="btn icon" disabled aria-label="Play">▶</button>
+      <span id="tc" class="mono">00:00.000 / 00:00.000</span>
+      <label class="speed small">Speed
+        <select id="speed" class="btn small" aria-label="Playback and export speed">
+          <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="0.75">0.75×</option>
+          <option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option>
+          <option value="2">2×</option><option value="4">4×</option>
+        </select></label>
+      <span class="spacer"></span>
+      <button id="rotate" class="btn small" disabled title="Rotate 90° clockwise (fixes clips with missing/wrong rotation tags)">Rotate ⟳</button>
+      <button id="setIn" class="btn small" disabled>Set in (I)</button>
+      <button id="setOut" class="btn small" disabled>Set out (O)</button>
+    </div>
+    <div id="timeline" class="timeline">
+      <div class="track"><span class="tlabel">V1</span><div class="lane"><div id="clipBar" class="clip video"></div></div></div>
+      <div class="track"><span class="tlabel">T1</span><div class="lane"><div id="titleBar" class="clip title">Title</div></div></div>
+      <div class="track"><span class="tlabel">A1</span><div class="lane"><canvas id="wave" class="wave"></canvas></div></div>
+      <div class="track"><span class="tlabel">VO</span><div class="lane" id="voLane"></div></div>
+      <div id="range" class="range"></div>
+      <div id="playhead" class="playhead"></div>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <h2>Clip effects</h2>
+    <div class="ctl"><label for="brightness">Brightness</label><input id="brightness" type="range" min="-0.5" max="0.5" step="0.01" value="0"></div>
+    <div class="ctl"><label for="contrast">Contrast</label><input id="contrast" type="range" min="0.5" max="1.8" step="0.01" value="1"></div>
+    <div class="ctl"><label for="saturation">Saturation</label><input id="saturation" type="range" min="0" max="2" step="0.01" value="1"></div>
+    <div class="ctl"><label for="temperature">Temperature</label><input id="temperature" type="range" min="-0.3" max="0.3" step="0.01" value="0"></div>
+    <div class="ctl"><label for="vignette">Vignette</label><input id="vignette" type="range" min="0" max="1" step="0.01" value="0"></div>
+    <div class="ctl"><label for="grain">Film grain</label><input id="grain" type="range" min="0" max="0.2" step="0.005" value="0"></div>
+
+    <h2>Title layer</h2>
+    <div class="ctl"><label for="titleText">Text</label><input id="titleText" type="text" value="Built with WebCodecs"></div>
+    <div class="row">
+      <div class="ctl"><label for="titleStart">Start (s)</label><input id="titleStart" type="number" step="0.1" min="0" value="1"></div>
+      <div class="ctl"><label for="titleEnd">End (s)</label><input id="titleEnd" type="number" step="0.1" min="0" value="5"></div>
+    </div>
+    <div class="ctl"><label for="titleY">Vertical position</label><input id="titleY" type="range" min="0.1" max="0.9" step="0.01" value="0.82"></div>
+
+    <h2>Audio</h2>
+    <div class="ctl"><label for="gain">Gain</label><input id="gain" type="range" min="0" max="2" step="0.01" value="1"></div>
+
+    <h2>Voice-over</h2>
+    <button id="rec" class="btn rec">● Record voice-over</button>
+    <label class="btn ghost small">Import audio file<input id="voFile" type="file" accept="audio/*" hidden></label>
+    <label class="check small"><input id="recMute" type="checkbox" checked><span>Mute clip audio while recording</span></label>
+    <div class="ctl"><label for="voGain">Voice level</label><input id="voGain" type="range" min="0" max="2" step="0.01" value="1"></div>
+    <div class="ctl"><label for="duck">Clip audio under voice (ducking)</label><input id="duck" type="range" min="0" max="1" step="0.01" value="0.35"></div>
+    <ul id="voList" class="volist"></ul>
+
+    <h2>Pipeline</h2>
+    <button id="clearStorage" class="btn ghost" type="button" title="Delete cached audio and exports from browser storage">Clear cached files</button>
+<dl id="stats" class="stats mono"></dl>
+
+    <div id="exportBox" class="exportbox" hidden>
+      <div class="progress"><div id="bar"></div></div>
+      <p id="exportMsg" class="mono small"></p>
+      <a id="download" class="btn primary" hidden download="framewright-export.mp4">Download MP4</a>
+      <video id="result" controls hidden></video>
+    </div>
+  </aside>
+</main>
+<p id="toast" class="toast" role="status"></p>
+<script type="module" src="app.js"></script>
+</body>
+</html>
